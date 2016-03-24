@@ -17,31 +17,31 @@
 
 static struct termios pots;             /* old port termios settings to restore */
 static struct termios sots;         /* old stdout/in termios settings to restore */
-int fd;
+static int fd;
+static char *lockfile = LOCK_FILE; 
 
 static void init_comm(struct termios *pts)
 {
-    /* some things we want to set arbitrarily */
-    pts->c_lflag &= ~ICANON;
-    pts->c_lflag &= ~(ECHO | ECHOCTL | ECHONL);
-    pts->c_cflag |= HUPCL;
-    pts->c_cflag |= CS8;
-    pts->c_iflag |= IGNBRK;
-    pts->c_cc[VMIN] = 1;
-    pts->c_cc[VTIME] = 0;
+        /* some things we want to set arbitrarily */
+        pts->c_lflag &= ~ICANON;
+        pts->c_lflag &= ~(ECHO | ECHOCTL | ECHONL);
+        pts->c_cflag |= HUPCL;
+        pts->c_cflag |= CS8;
+        pts->c_iflag |= IGNBRK;
+        pts->c_cc[VMIN] = 1;
+        pts->c_cc[VTIME] = 0;
 
-    /* Standard CR/LF handling: this is a dumb terminal.
-     * Do no translation:
-     *  no NL -> CR/NL mapping on output, and
-     *  no CR -> NL mapping on input.
-     */
-    pts->c_oflag &= ~ONLCR;
-    pts->c_iflag &= ~ICRNL;
+        /* Standard CR/LF handling: this is a dumb terminal.
+         * Do no translation:
+         *  no NL -> CR/NL mapping on output, and
+         *  no CR -> NL mapping on input.
+         */
+        pts->c_oflag &= ~ONLCR;
+        pts->c_iflag &= ~ICRNL;
     
-    /* no flow control */
-    pts->c_cflag &= ~CRTSCTS;
-    pts->c_iflag &= ~(IXON | IXOFF | IXANY);
-
+        /* no flow control */
+        pts->c_cflag &= ~CRTSCTS;
+        pts->c_iflag &= ~(IXON | IXOFF | IXANY);
 }
 
 static int baudrate_to_flag(int speed, speed_t *flag)
@@ -126,11 +126,13 @@ static int do_commandline(void)
         int ret;
 
         tcsetattr(fd, TCSANOW, &pots);
-//      close(fd);
+        close(fd);
 
         tcsetattr(STDIN_FILENO, TCSANOW, &sots);
+        unlink(lockfile);
 
-        return 0;
+        printf("\ndisconnect\n");
+        exit(0);
 }
 
 
@@ -151,7 +153,6 @@ static void cook_buf(int fd, unsigned char *buf, int num)
                 if (current < num) {    /* process an escape sequence */
                         /* found an escape character */
                         do_commandline();
-                        return;
                 }               /* if - end of processing escape sequence */
                 num -= current;
                 buf += current;
@@ -175,11 +176,11 @@ static int mux_loop(void)
                 select(fd + 1, &ready, NULL, NULL, NULL);
 
                 if (FD_ISSET(fd, &ready)) {
-                        /* pf has characters for us */
-                        len = read(fd, buf, BUFSIZE);
-                        if (len < 0)
-                                return -errno;
-                        if (len == 0)
+                /* pf has characters for us */
+                len = read(fd, buf, BUFSIZE);
+                if (len < 0)
+                        return -errno;
+                    if (len == 0)
                                 return -EINVAL;
 
                         write(STDOUT_FILENO, buf, len);
@@ -201,66 +202,66 @@ static int mux_loop(void)
 
 int main(void)
 {
-    char *device = DEFAULT_DEVICE;
-    char *lockfile = LOCK_FILE; 
+        char *device = DEFAULT_DEVICE;
         struct termios pts;
-    speed_t flag;
-    int current_speed = DEFAULT_BAUDRATE;
+        speed_t flag;
+        int current_speed = DEFAULT_BAUDRATE;
         int lockfd, ret;
         struct sigaction sact;  /* used to initialize the signal handler */
-
+    
         lockfd = open(lockfile, O_RDONLY);
         if (lockfd > 0) {
-                close(fd);
-                printf("lockfile exists, cannot open device %s\n", device);
-                exit(1);
+            close(fd);
+            printf("lockfile exists, cannot open device %s\n", device);
+            exit(1);
         }
-
+    
         lockfd = open(lockfile, O_RDONLY | O_CREAT);
         if (fd < 0 ) {
-                printf("cannot create lockfile. ignoring\n");
-                exit(1);
-        }
-
-    fd = open(device, O_RDWR);
-    if (fd < 0) {
-        printf("cannot open device %s", device);
+            printf("cannot create lockfile. ignoring\n");
                 exit(1);
         }
     
-    /* modify the port configuration */
-    tcgetattr(fd, &pts);
-    memcpy(&pots, &pts, sizeof (pots));
-    init_comm(&pts);
-    tcsetattr(fd, TCSANOW, &pts);
-    printf("connected to %s\n", device);
+        fd = open(device, O_RDWR);
+        if (fd < 0) {
+            printf("cannot open device %s", device);
+            exit(1);
+        }
+        
+        /* modify the port configuration */
+        tcgetattr(fd, &pts);
+        memcpy(&pots, &pts, sizeof (pots));
+        init_comm(&pts);
+        tcsetattr(fd, TCSANOW, &pts);
+        printf("connected to %s\n", device);
+    
+        baudrate_to_flag(current_speed, &flag);
+        serial_set_speed(fd, flag);
+    
+        printf("Escape character: Ctrl-\\\n");
+    
+        /* Now deal with the local terminal side */
+        tcgetattr(STDIN_FILENO, &sots);
+        init_terminal();
+    
+        /* set the signal handler to restore the old
+         * termios handler */
+        sact.sa_handler = &handle_exit;
+        sigaction(SIGHUP, &sact, NULL);
+        sigaction(SIGINT, &sact, NULL);
+        sigaction(SIGPIPE, &sact, NULL);
+        sigaction(SIGTERM, &sact, NULL);
+        sigaction(SIGQUIT, &sact, NULL);
+    
+        /* run the main program loop */
+        ret = mux_loop();
+        if (ret)
+            fprintf(stderr, "%s\n", strerror(-ret));
+    
+        tcsetattr(fd, TCSANOW, &pots);
+        close(fd);
+        tcsetattr(STDIN_FILENO, TCSANOW, &sots);
 
-    baudrate_to_flag(current_speed, &flag);
-    serial_set_speed(fd, flag);
-
-    printf("Escape character: Ctrl-\\\n");
-
-    /* Now deal with the local terminal side */
-    tcgetattr(STDIN_FILENO, &sots);
-    init_terminal();
-
-    /* set the signal handler to restore the old
-     * termios handler */
-    sact.sa_handler = &handle_exit;
-    sigaction(SIGHUP, &sact, NULL);
-    sigaction(SIGINT, &sact, NULL);
-    sigaction(SIGPIPE, &sact, NULL);
-    sigaction(SIGTERM, &sact, NULL);
-    sigaction(SIGQUIT, &sact, NULL);
-
-    /* run the main program loop */
-    ret = mux_loop();
-    if (ret)
-        fprintf(stderr, "%s\n", strerror(-ret));
-
-    tcsetattr(fd, TCSANOW, &pots);
-    close(fd);
-    tcsetattr(STDIN_FILENO, TCSANOW, &sots);
-
-    exit(ret ? 1 : 0);
+        unlink(lockfile);
+        exit(ret ? 1 : 0);
 }
